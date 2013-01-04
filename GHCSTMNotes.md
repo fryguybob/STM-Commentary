@@ -1,10 +1,10 @@
 % GHC STM Notes
 % Ryan Yates
-% 12-22-2012
+% 1-2-2013
 
 # Introduction
 
-This document give an overview of the runtime system (rts) support for
+This document give an overview of the runtime system (RTS) support for
 GHC's STM implementation.  Specifically we look at the case where fine
 grain locking is used (`STM_FG_LOCKS`).
 
@@ -45,14 +45,14 @@ running the transaction.
 ## Nesting
 
 In addition, transactions can be "retried" with explicit `retry` that aborts
-the transaciton and allows an alternative transaction to run on the current thread
+the transaction and allows an alternative transaction to run on the current thread
 with the `orElse` combinator or the same transaction can be run again when 
 changes happen on another thread.
 
 ## Validation
 
 Before a transaction can publish its effects it must check that it has
-seen a consistant view of memory while it was executing.
+seen a consistent view of memory while it was executing.
 
 ## Committing
 
@@ -62,12 +62,11 @@ numbers have stayed consistent.  If all this holds we will have acquired
 the locks for the affected `TVar`s and can atomically make visible changes
 to memory (with respect to other transactions).
 
-TODO: talk about the mechinism, locking, and have worked examples.
+TODO: talk about the mechanism, locking, and have worked examples.
 
 ## Aborting
 
-Aborting is simple in that we just throw away changes that are stored
-in the `TRec`.
+Aborting is simply throwing away changes that are stored in the `TRec`.
 
 ## Invariants
 
@@ -114,6 +113,8 @@ invariants have been checked, the frame will be attempt to commit.
 
 TODO: Explain how `stmGetInvariantsToCheck` works.
 
+For each update entry (a write to a `TVar`) in the `TRec` 
+
 Note that there is a `check` in the `stm` package in `Control.Monad.STM` which matches
 the `check` from the "Beautiful concurrency" chapter of "Beautiful code" [beauty]:
 
@@ -128,9 +129,17 @@ an invariant that will be checked at commits.
 
 With `retry`, `orElse`, and invariants we have conditions beyond a consistent
 view of memory that need to hold for the transaction to commit. To efficiently
-resolve these conditions transactions are not immediately
-restarted when they do not hold, but wait for something to change that might 
-make it possible to succeed on a subsequent attempt.
+resolve failing conditions, transactions are not immediately restarted but wait
+for something to change that might make it possible to succeed on a subsequent
+attempt.  This is done using the watch queue associated with each `TVar`.
+The watch queue contains invariants (when ???) and TSOs.  When a transaction
+executes `retry` and there is no `CATCH_RETRY_FRAME` (from an `orElse`) above it
+(it has exhausted all the alternatives) the transaction will wait by calling
+`stmWait`.  This verifies that the transaction is valid (acquiring locks for all
+`TVar`s in the `TRec`) and if valid adds the transaction's TSO to each `TVar`s
+watch queue.  When another thread commits a transaction that writes to a `TVar`,
+each TSO on the watch queue is woken (scheduled for running on the current 
+capability).
 
 TODO: add details about watch queues.
 
