@@ -8,6 +8,14 @@ This document give an overview of the runtime system (RTS) support for
 GHC's STM implementation.  Specifically we look at the case where fine
 grain locking is used (`STM_FG_LOCKS`).
 
+Some details about the implementation can be found in the papers 
+["Composable Memory Transactions"][composable]
+and ["Transactional memory with data invariants"][invariant].  Additional 
+details can be found in the Harris et al book
+["Transactional memory"][HarrisBook].  Some analysis on performance can be
+found in the paper  ["The Limits of Software Transactional Memory"][limits].
+Many of the details here are gleaned from the comments in the source code.
+
 # Background
 
 TODO: fill in enough background details and links, a good starting point is
@@ -18,17 +26,17 @@ here: <http://hackage.haskell.org/trac/ghc/wiki/Commentary/Compiler/GeneratedCod
 `Capability`
 
 :   Corresponds to a CPU.  The number of capabilities should match the number of
-    CPUs.  See [cap].
+    CPUs.  See [Capabilities][cap].
 
 `TSO`
 
-:   Thread State Object.  The state of a Haskell thread.  See [tso].
+:   Thread State Object.  The state of a Haskell thread.  See [Thread State Objects][tso].
 
 Heap object
 
 :   Objects on the heap all take the form of an `StgClosure` structure with a 
     header pointing and a payload of data.  The header points to code and an 
-    info table.  See [heap].
+    info table.  See [Heap Objects][heap].
 
 # Overview
 
@@ -52,7 +60,10 @@ changes happen on another thread.
 ## Validation
 
 Before a transaction can publish its effects it must check that it has
-seen a consistent view of memory while it was executing.
+seen a consistent view of memory while it was executing.  Most of the work
+is done in `validate_and_acquire_ownership` by checking that `TVar`s hold
+their expected values and recording which `TRec` corrisponds to each write
+(TODO: why?).
 
 ## Committing
 
@@ -116,7 +127,7 @@ TODO: Explain how `stmGetInvariantsToCheck` works.
 For each update entry (a write to a `TVar`) in the `TRec` 
 
 Note that there is a `check` in the `stm` package in `Control.Monad.STM` which matches
-the `check` from the "Beautiful concurrency" chapter of "Beautiful code" [beauty]:
+the `check` from the [beauty] chapter of "Beautiful code":
 
     check :: Bool -> STM ()
     check b = if b then return () else retry
@@ -299,11 +310,37 @@ TODO: schedule, GC, and exception details.
 
 
 [heap]: http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/HeapObjects
+    "Heap Objects"
 
 [tso]: http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/HeapObjects#ThreadStateObjects
+    "Thread State Objects"
 
 [cap]: http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Scheduler#Capabilities
+    "Capabilities"
 
 [beauty]: http://research.microsoft.com/pubs/74063/beautiful.pdf
+    "Beautiful Concurrency"
 
 [invariant]: http://research.microsoft.com/en-us/um/people/simonpj/papers/stm/stm-invariants.pdf
+    "Transactional memory with data invariants"
+
+[composable]: http://research.microsoft.com/en-us/um/people/simonpj/papers/stm/stm.pdf
+    "Composable Memory Transactions"
+    
+[limits]: https://www.bscmsrc.eu/sites/default/files/cf-final.pdf
+    "The Limits of Software Transactional Memory"
+    
+[HarrisBook]: http://www.morganclaypool.com/doi/abs/10.2200/s00272ed1v01y201006cac011
+    "Transactional Memory"
+    
+## Bibliography
+
+Harris, Tim, James Larus, and Ravi Rajwar. "Transactional memory." *Synthesis Lectures on Computer Architecture* 5.1 (2010): 1-263.
+
+Jones, Simon Peyton. "Beautiful concurrency." *Beautiful Code: Leading Programmers Explain How They Think* (2007): 385-406.
+
+Harris, Tim, et al. "Composable memory transactions." *Proceedings of the tenth ACM SIGPLAN symposium on Principles and practice of parallel programming.* ACM, 2005.
+
+Perfumo, Cristian, et al. "The limits of software transactional memory (STM): dissecting Haskell STM applications on a many-core environment." *Proceedings of the 5th conference on Computing frontiers.* ACM, 2008.
+
+Harris, Tim, and Simon Peyton Jones. "Transactional memory with data invariants." *First ACM SIGPLAN Workshop on Languages, Compilers, and Hardware Support for Transactional Computing (TRANSACT'06), Ottowa.* 2006.
