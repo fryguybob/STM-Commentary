@@ -13,8 +13,9 @@ Some details about the implementation can be found in the papers
 and ["Transactional memory with data invariants"][invariant].  Additional 
 details can be found in the Harris et al book
 ["Transactional memory"][HarrisBook].  Some analysis on performance can be
-found in the paper  ["The Limits of Software Transactional Memory"][limits].
-Many of the details here are gleaned from the comments in the source code.
+found in the paper ["The Limits of Software Transactional Memory"][limits]
+though this work only looks at the coarse grain lock version.
+Many of the other details here are gleaned from the comments in the source code.
 
 # Background
 
@@ -38,42 +39,171 @@ Heap object
     header pointing and a payload of data.  The header points to code and an 
     info table.  See [Heap Objects][heap].
 
-# Overview
+# Overview of Features
 
 TODO: code examples in all of the subsections of the overview.
 
-At the high level, transactions are computations that read and write to
-`TVar`s with changes only being committed atomically and reads only
-seeing consistent state.  Transactions can also
-be composed together, building new transactions out of existing transactions.
-In the RTS each transaction keeps a record of its interaction with the `TVar`s
-it touches in a `TRec`.  A pointer to this record is stored in the TSO that is
-running the transaction.
+At the high level, transactions are computations that read and write to `TVar`s
+with changes only being committed atomically after seeing a consistent view of
+memory.  Transactions can also be composed together, building new transactions
+out of existing transactions.  In the RTS each transaction keeps a record of
+its interaction with the `TVar`s it touches in a `TRec`.  A pointer to this
+record is stored in the TSO that is running the transaction.
 
-## Nesting
+## Reading and Writing
 
-In addition, transactions can be "retried" with explicit `retry` that aborts
-the transaction and allows an alternative transaction to run on the current thread
-with the `orElse` combinator or the same transaction can be run again when 
-changes happen on another thread.
+The semantics of a transaction require that when a `TVar` is read in a transaction,
+ts value will stay the same for the duration of execution.  Similarly a write
+to a `TVar` will keep the same value for the duration of the transaction.  The
+transaction itself, however, from the perspective of other threads can apply
+all of its effects in one moment.  That is, other threads cannot see intermediate
+states of the transaction, so it is as if all the effects happen in a single moment.
+
+As a simple example we can consider a transaction that transfers value between two accounts:
+
+~~~~{.haskell}
+transfer :: Int -> TVar Int -> TVar Int -> STM ()
+transfer v a b = do
+    x <- readTVar a
+    y <- readTVar b
+    writeTVar a (x - v)
+    writeTVar b (y + v)
+~~~~
+
+No other thread can observe the value `x - v` in `a` without also observing `y + v` in `b`.
+
+## Blocking
+
+Transactions can choose to block until changes are made to `TVar`s that allow
+it to try again.  This is enabled with an explicit `retry`.  Note that when
+changes are made the transaction is restarted from the beginning.
+
+Continuing the example, we can choose to block when there are insufficient funds:
+
+~~~~{.haskell}
+transferBlocking :: Int -> TVar Int -> TVar Int -> STM ()
+transferBlocking v a b = do
+    x <- readTVar a
+    y <- readTVar b
+    if x < v
+      then retry
+      else do
+              writeTVar a (x - v)
+              writeTVar b (y + v)
+~~~~
+
+## Choice
+
+Any blocking transaction can be composed with `orElse` to choose an alternative
+transaction to run instead of blocking.  The `orElse` primitive operation creates
+a nested transaction and if this first transaction executes `retry`, the effects
+of the nested transaction are rolled back and the alternative transaction is
+executed.  This choice is biased towards the first parameter.  A validation failure
+in the first branch aborts the entire transaction, not just the nested part.
+An explicit `retry` is the only mechanism that gives partial rollback.
+
+We now can choose the account that has enough funds for the transfer: 
+
+~~~~{.haskell}
+transferChoice :: Int -> TVar Int -> TVar Int -> TVar Int -> STM ()
+transferChoice v a a' b = do
+    transferBlocking v a b `orElse` transferBlocking v a' b
+~~~~
+
+## Data Invariants
+
+Invariants support checking global data invariants beyond the atomicity
+transactions demand.  For instance, a transactional linked list (written
+correctly) will never have an inconsistent structure due to the atomicity of
+updates.  It is no harder to maintain this property in a concurrent setting
+then in a sequential one with STM.  It may be desired, however, to make
+statements about the consistency of the *data* in a particular a sorted linked
+list is sorted, not because of the structure (where the `TVar`s point to) but
+instead because of the data in the structure (the relation between the data in
+adjacent nodes).  Global data invariant checks can be introduced with the
+`always` operation which demands that the transaction it is given results in
+`True` very every transaction that is committed globally.
+
+We can use data invariants to guard against negative balances:
+
+~~~~{.haskell}
+newNonNegativeAccount :: STM (TVar Int)
+newNonNegativeAccount = do
+    t <- newTVar 0
+    always $ do
+        x <- readTVar t
+        return (x > 0)
+    return t
+~~~~
+
+# Overview of the Implementation
+
+## Reading
+
+The `TRec` will have an entry for each accessed `TVar`.  When a read is
+attempted we first search the `TRec` for an existing entry.  If it is found, we
+use that local view of the variable.  On the first read of the variable, a new
+entry is allocated and the value of the variable is read and stored locally.
+The original `TVar` does not need to be accessed again for its value until a
+validation check is needed.
+
+In the coarse grain version, the read is done without synchronization.
+With the fine grain lock, the lock variable is the `current_value` of the
+`TVar` structure.  While reading an inconsistent value is an issue that can be
+resolved later, reading a value that indicates a lock and handing that value
+to code that expects a different type of heap object will almost certainly lead to
+a runtime failure.  To avoid this the fine grain lock version of the code will
+spin if the value read is a lock, waiting to observe the lock released with an
+appropriate pointer to a heap object.
+
+## Writing
+
+Writing to a `TVar` requires that the variable first be in the `TRec`.  If it
+is not currently in the `TRec`, a read of the `TVar`'s value is stored in a new
+entry (this value will be used to validate and ensure that no updates were made
+concurrently to this variable).
+
+In both the fine grain and coarse grain lock versions of the code no
+synchronization is needed to perform the write as the value is stored locally
+in the `TRec` until commit time.
 
 ## Validation
 
-Before a transaction can publish its effects it must check that it has
-seen a consistent view of memory while it was executing.  Most of the work
-is done in `validate_and_acquire_ownership` by checking that `TVar`s hold
-their expected values and recording which `TRec` corrisponds to each write
-(TODO: why?).
+Before a transaction can make its effects visible to other threads it must
+check that it has seen a consistent view of memory while it was executing.
+Most of the work is done in `validate_and_acquire_ownership` by checking that
+`TVar`s hold their expected values.
+
+For the coarse grain lock version the lock is held before entering
+`validate_and_acquire_ownership` through the writing of values to `TVar`s.
+With the fine grain lock, validation acquires locks for the write set and reads
+a version number consistent with the expected value for each `TVar` in the read
+set.  After all the locks for writes have been acquired, The read set is
+checked again to see if each value is still the expected value and the version
+number still matches (`check_read_only`).
 
 ## Committing
 
-When we try to commit we check that invariants continue to hold, that
-we have seen a consistent view of memory (validation), and that version
-numbers have stayed consistent.  If all this holds we will have acquired
-the locks for the affected `TVar`s and can atomically make visible changes
-to memory (with respect to other transactions).
+Before committing, each invariant associated with each accessed `TVar` needs to
+be checked by running the invariant transaction with its own `TRec`.  The read
+set for each invariant is merged into the transaction as those reads must be
+included in the consistency check.  The `TRec` is then validated.  If
+validation fails, the transaction must start over from the beginning after
+releasing all locks.  In the case of the coarse grain lock validation and
+commit are in a critical section protected by the global STM lock.  Updates to
+`TVar`s proceeds while holding the global lock.
 
-TODO: talk about the mechanism, locking, and have worked examples.
+With the fine grain lock version when validation, including any read-only
+phase, succeeds, two properties will hold that give the desired atomicity:
+
+1)  Validation has witnessed all `TVar`s with their expected value.
+2)  Locks are held for all of the `TVar`s in the write set.
+
+Commit can proceed to increment each locked `TVar`'s `num_updates` field and
+unlock by writing the new value to the `current_value` field.  While these
+updates happen one-by-one, any attempt to read from this set will spin while
+the lock is held.  Any reads made before the lock was acquired will fail to
+validate as the number of updates will change.
 
 ## Aborting
 
@@ -320,6 +450,9 @@ TODO: schedule, GC, and exception details.
 
 [beauty]: http://research.microsoft.com/pubs/74063/beautiful.pdf
     "Beautiful Concurrency"
+
+[beauty-soh]: https://www.fpcomplete.com/school/beautiful-concurrency
+    "Beautiful Concurrency (interactive)"
 
 [invariant]: http://research.microsoft.com/en-us/um/people/simonpj/papers/stm/stm-invariants.pdf
     "Transactional memory with data invariants"
