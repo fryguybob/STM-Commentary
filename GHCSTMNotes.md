@@ -53,12 +53,25 @@ Write set
     code each written `TVar` is called an "update entry" in the transactional
     record.
 
-access set
+Access set
 
 :   All `TVar`s accessed durring the transaction.
 
 While GHC's STM does not have a separate read set and write set these terms
 are useful for discussion.
+
+Retry
+
+:   Here we will use the term retry exclusively for the blocking primitive in
+    GHC's STM.  This should not be confused with the steps taken when a 
+    transaction detects that it has seen an inconsistent view of memory and
+    must start again from the beginning.
+
+Failure
+
+:   A failed transaction is one that has seen inconsistent state.  This should
+    not be confused with a successful transaction that executes the `retry`
+    primitive.
 
 # Overview of Features
 
@@ -158,8 +171,9 @@ newNonNegativeAccount = do
 ## Exceptions
 
 Exceptions inside transactions should only propagate outside if the transaction
-has seen a consistent view of memory.
-
+has seen a consistent view of memory.  Note that the semantics of exceptions
+allow the exception itself to capture the view of memory from inside the
+transaction, but this transaction is not committed.
 
 # Overview of the Implementation
 
@@ -285,7 +299,8 @@ Aborting is simply throwing away changes that are stored in the `TRec`.
 
 An exception in a transaction will only propagate outside of the transaction if
 the transaction can be validated.  If validation fails, the whole transaction will 
-abort and start again from the beginning.
+abort and start again from the beginning.  Nothing special needs to be done
+to support the semantics allowing the view *inside* the aborted transaction.
 
 (See [source:rts/Exception.cmm] which calls `stmValidateNestOfTransactions` from
 [source:rts/STM.c]).
@@ -318,7 +333,7 @@ be run, but before restarting the transaction its `TRec` is validated again if
 valid then nothing has changed that will allow the transaction to proceed with
 a different result.  If invalid, some other transaction has committed and
 progress may be possible (note there is the additional case that some other
-transaction is merely holding a lock temporarily causing validation to fail).
+transaction is merely holding a lock temporarily, causing validation to fail).
 The TSO is not removed from the watch queues it is on until the transaction is
 aborted (at this point we no longer need the `TRec`) and the abort happens
 after the failure to validate on wakeup.  (See [source:rts/STM.c] `stmReWait`
@@ -349,6 +364,11 @@ to take this into account.
 -   **Writing** -- Writes, like reads, now search the parent `TRec`s and the
     write is stored in the local copy.
 
+-   **Retry** -- As described above, we now need to search the stack for a
+    `CATCH_RETRY_FRAME` and if found, aborting the nested transaction and
+    attempting the alternative or propagating the retry instead of immediately
+    working on blocking.
+
 -   **Validation** -- If we are validating in the middle of a running
     transaction we will need to validate the whole nest of transactions.
 
@@ -365,7 +385,7 @@ to take this into account.
 
 -   **Aborting** -- There is another subtle issue with how choice and blocking
     interact.  When we block we need to wake up if there is a change to *any*
-    accessed `TVar`.  Consider a transaction `t = t1 `orElse` t2` where both
+    accessed `TVar`.  Consider a transaction `t = t1 \`orElse\` t2` where both
     `t1` and `t2` execute `retry`.  Even though the effects of `t1` are thrown
     away, it could be that a change to a `TVar` that is only in the access set
     of `t1` will allow the whole transaction to succeed when it is woken.
@@ -373,26 +393,37 @@ to take this into account.
     To solve this problem, when a branch on a nested transaction is aborted the
     access set of the nested transaction is merged as a read set into the
     parent `TRec`.  Specifically if the `TVar` is in *any* `TRec` up the chain
-    of nested transactions it can be ignored, otherwise it is entered as a new
+    of nested transactions it must be ignored, otherwise it is entered as a new
     entry (retaining just the read) in the parent `TRec`.
 
     (See again [trac:#7493] and [source:rts/STM.c] `merge_read_into`)
 
--   **Exceptions** -- 
+-   **Exceptions** -- The only change needed here each `CATCH_RETRY_FRAME` on
+    the stack represents a nested transaction.  As the stack is searched for a
+    handler, at each encountered `CATCH_RETRY_FRAME` the nested transaction is
+    aborted.  When the `ATOMICALLY_FRAME` is encountered we then know that
+    there is no nested transaction.
+
+    (See [source:rts/Exception.cmm] `stg_raisezh`)
 
 (See [source:rts/PrimOps.cmm] `stg_retryzh` and `stg_catch_retry_frame`)
 
 ## Invariants
 
-As a transaction is executing it can collect a queue of dynamically checked
+We will start this section with an overview of some of the details then review
+with notes on the changes from the choice case.
+
+### Details
+
+As a transaction is executing it can collect dynamically checked data
 invariants.  These invariants are transactions that are never committed, but if
 they raise an exception when executed successfully that exception will
 propagate out of the atomic frame.
 
 `check#`
 
-:   Primitive operation that adds an invariant (transaction to run) to the queue
-    of the current `TRec` by calling `stmAddInvariantToCheck`.
+:   Primitive operation that adds an invariant (transaction to run) to the
+    queue of the current `TRec` by calling `stmAddInvariantToCheck`.
 
 `checkInv :: STM a -> STM ()`
 
@@ -401,9 +432,10 @@ propagate out of the atomic frame.
 `alwaysSucceeds :: STM a -> STM ()`
 
 :   This is the `check` from the "Transactional memory with data invariants"
-    paper.  The action immediately runs, wrapped in a nested transaction so that it
-    will never commit but will have an opportunity to raise an exception.  If
-    successful, the originally passed action is added to the invariant queue. 
+    paper.  The action immediately runs, wrapped in a nested transaction so
+    that it will never commit but will have an opportunity to raise an
+    exception.  If successful, the originally passed action is added to the
+    invariant queue. 
 
 `always :: STM Bool -> STM ()`
 
@@ -413,18 +445,18 @@ propagate out of the atomic frame.
 The bookkeeping for invariants is in each `TRec`s `invariants_to_check` queue
 and the `StgAtomicallyFrame`s `next_invariant_to_check` field.  Each invariant
 is in a `StgAtomicInvariant` structure that includes the `STM` action, the
-`TRec` where it was last executed, and a lock (TODO: why a lock?).  This is
-added to the current `TRec`s queue when `check#` is executed.
+`TRec` where it was last executed, and a lock.  This is added to the current
+`TRec`s queue when `check#` is executed.
 
 When a transaction completes, execution will reach the `stg_atomically_frame`
 and the `TRec`s `enclosing_trec` will be `NO_TREC` (a nested transaction would
 have a `stg_catch_retry_frame` before the `stg_atomically_frame` to handle
 cases of non-empty `enclosing_trec`).  The frame will then check the invariants
 by collecting the invariants it needs to check with `stmGetInvariantsToCheck`,
-dequeuing each, executing, and when (or if) we get back to the frame aborting
-the invariant action (if it failed, we would not get here due to an exception,
-if it succeeds we do not want its effects).  Once all the invariants have been
-checked, the frame will be attempt to commit.
+dequeuing each, executing, and when (or if) we get back to the frame, aborting
+the invariant action.  If the invariant failed to hold, we would not get here
+due to an exception and if it succeeds we do not want its effects.  Once all
+the invariants have been checked, the frame will to commit.
 
 TODO: Explain how `stmGetInvariantsToCheck` works.
 
@@ -440,6 +472,53 @@ It requires no additional runtime support.  If it is a transaction that produces
 `Bool` argument it will be committed (when `True`) and it is only a one time check, not
 an invariant that will be checked at commits.
 
+### Changes from Choice
+
+With the addition of data invariants we have the following changes to the implementation:
+
+-   **Retrying** -- A retry in an invariant indicates that the invariant could not
+    proceed and the whole transaction should block.  This special
+    case is detected when an `ATOMICALLY_FRAME` is encountered with a nest
+    of transactions (i.e. when the `enclosing_trec` field is not `NO_TREC`).
+    The invariant is simply aborted and execution proceeds to `stmWait`
+    (see [source:rts/PrimOps.cmm] `stg_retryzh`).
+
+-   **Commiting** -- Commit now needs a phase where it runs invariants after
+    the code of the transaction has completed but before commit.  The
+    implementation recycles the structure already in place for this phase so
+    special cases are needed in the `ATOMICALLY_FRAME` that collects invariants
+    and works through them one at a time then moves on to committing (see
+    [source:rts/PrimOps.cmm] `stg_atomically_frame`).
+
+    To efficiently handle invariants they need to only be checked when a
+    relevant data dependency changes.  This means we can associate them with
+    the `TRec` of the last commit that needed to check the invariant at the
+    cost of serializing invariant handling commits.  This is enforced by the
+    lock on each invariant.  If it cannot be acquired the whole transaction
+    must start over.
+
+    At commit time, each invariant is locked and the read set for the last
+    commited transaction of each invariant is merged into the `TRec`.  
+    Validation acuqires lock for all entries in the `TRec` (not just the
+    writes).  After validation, each invariant is removed from the
+    watch queue of each `TVar` it previously depended on, then the `TRec`
+    that was used when executing the invariant code is updated to reflect
+    the values from the final execution of the main transaction and each
+    `TVar`, being a data depenency of the invariant, has the invariant 
+    added to its watch queue.
+
+    (See [source:rts/STM.c] `stmCommitTransaction`, `disconnect_invariant`
+    and `connect_invariant_to_trec`)
+
+-   **Exceptions** -- When an exception propagates to the `ATOMICALLY_FRAME`
+    there are now two states that it could encounter.  If there is no enclosing
+    `TRec` we are not dealing with an exception from an invariant and it
+    proceeds as above.  Seeing a nest of transactions indicates that the
+    transaction was checking an invariant when it encountered the exception.
+    The effect of a failed invariant *is* this exception so nothing special
+    needs to be done except to validate and abort both the outer transaction
+    and the nested transaction (see [source:rts/Exception.cmm] `stg_raisezh`).
+
 ## Other Details
 
 TODO: GC and ABA.
@@ -450,25 +529,32 @@ TODO: Asynchronous exceptions?
 
 TODO: Tokens and version numbers.
 
-## Watch Queues
+TODO: Transaction status.
 
-With `retry`, `orElse`, and invariants we have conditions beyond a consistent
-view of memory that need to hold for the transaction to commit. To efficiently
-resolve failing conditions, transactions are not immediately restarted but wait
-for something to change that might make it possible to succeed on a subsequent
-attempt.  This is done using the watch queue associated with each `TVar`.
-The watch queue contains invariants (when ???) and TSOs.  When a transaction
-executes `retry` and there is no `CATCH_RETRY_FRAME` (from an `orElse`) above it
-(it has exhausted all the alternatives) the transaction will wait by calling
-`stmWait`.  This verifies that the transaction is valid (acquiring locks for all
-`TVar`s in the `TRec`) and if valid adds the transaction's TSO to each `TVar`s
-watch queue.  When another thread commits a transaction that writes to a `TVar`,
-each TSO on the watch queue is woken (scheduled for running on the current 
-capability).
+TODO: Management of `TRec`s, chunks, recycling.
 
-TODO: add details about watch queues.
 
-## Fine Grain Locking
+### Implementation Invariants
+
+Some of the invariants of the implementation:
+
+-   Locks are only acquired in [source:rts/STM.c] and are always released
+    before the end of a function call (with the exception of `stmWait` which
+    must release locks after the thread is safe).
+
+-   When running a transaction each `TVar` is read exactly once and if it is a
+    write, is updated exactly once.
+
+-   Main memory (`TVar`s) always holds consistent values or locks of a
+    partially updated commit.  That is a set of reads at any moment from
+    `TVar`s will result in consistent data if none of the values are locks.
+
+-   A nest of `TRec`s has a matching nest of `CATCH_RETRY_FRAME`s ending with
+    an `ATOMICALLY_FRAME` on the stack.  One exception to this is when checking
+    data invariants the invariant's `TRec` is nested under the top level `TRec`
+    without a `CATCH_RETRY_FRAME`.
+
+### Fine Grain Locking
 
 The locks in fine grain locking (`STM_FG_LOCKS`) are at the `TVar`
 level and are implemented by placing the locking thread's `TRec` in
