@@ -2,44 +2,181 @@
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
   <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta http-equiv="Content-Style-Type" content="text/css" />
   <meta name="generator" content="pandoc" />
   <meta name="author" content="Ryan Yates" />
-  <meta name="date" content="1-2-2013" />
   <title>GHC STM Notes</title>
+  <style type="text/css">code{white-space: pre;}</style>
+  <style type="text/css">
+table.sourceCode, tr.sourceCode, td.lineNumbers, td.sourceCode {
+  margin: 0; padding: 0; vertical-align: baseline; border: none; }
+table.sourceCode { width: 100%; line-height: 100%; }
+td.lineNumbers { text-align: right; padding-right: 4px; padding-left: 4px; color: #aaaaaa; border-right: 1px solid #aaaaaa; }
+td.sourceCode { padding-left: 5px; }
+code > span.kw { color: #007020; font-weight: bold; }
+code > span.dt { color: #902000; }
+code > span.dv { color: #40a070; }
+code > span.bn { color: #40a070; }
+code > span.fl { color: #40a070; }
+code > span.ch { color: #4070a0; }
+code > span.st { color: #4070a0; }
+code > span.co { color: #60a0b0; font-style: italic; }
+code > span.ot { color: #007020; }
+code > span.al { color: #ff0000; font-weight: bold; }
+code > span.fu { color: #06287e; }
+code > span.er { color: #ff0000; font-weight: bold; }
+  </style>
   <link rel="stylesheet" href="style.css" type="text/css" />
 </head>
 <body>
+<div id="header">
 <h1 class="title">GHC STM Notes</h1>
+<h2 class="author">Ryan Yates</h2>
+<h3 class="date">1-2-2013</h3>
+</div>
 <h1 id="introduction">Introduction</h1>
-<p>This document give an overview of the runtime system (RTS) support for GHC's STM implementation. Specifically we look at the case where fine grain locking is used (<code>STM_FG_LOCKS</code>).</p>
+<p>This document give an overview of the runtime system (RTS) support for GHC's STM implementation. We will focus on the case where fine grain locking is used (<code>STM_FG_LOCKS</code>).</p>
+<p>Some details about the implementation can be found in the papers <a href="http://research.microsoft.com/en-us/um/people/simonpj/papers/stm/stm.pdf" title="Composable Memory Transactions">&quot;Composable Memory Transactions&quot;</a> and <a href="http://research.microsoft.com/en-us/um/people/simonpj/papers/stm/stm-invariants.pdf" title="Transactional memory with data invariants">&quot;Transactional memory with data invariants&quot;</a>. Additional details can be found in the Harris et al book <a href="http://www.morganclaypool.com/doi/abs/10.2200/s00272ed1v01y201006cac011" title="Transactional Memory">&quot;Transactional memory&quot;</a>. Some analysis on performance can be found in the paper <a href="https://www.bscmsrc.eu/sites/default/files/cf-final.pdf" title="The Limits of Software Transactional Memory">&quot;The Limits of Software Transactional Memory&quot;</a> though this work only looks at the coarse grain lock version. Many of the other details here are gleaned from the comments in the source code.</p>
 <h1 id="background">Background</h1>
-<p>TODO: fill in enough background details and links, a good starting point is here: <a href="http://hackage.haskell.org/trac/ghc/wiki/Commentary/Compiler/GeneratedCode"><code class="url">http://hackage.haskell.org/trac/ghc/wiki/Commentary/Compiler/GeneratedCode</code></a></p>
+<p>TODO: fill in enough background details and links, a good starting point is here: <a href="http://hackage.haskell.org/trac/ghc/wiki/Commentary/Compiler/GeneratedCode">http://hackage.haskell.org/trac/ghc/wiki/Commentary/Compiler/GeneratedCode</a></p>
 <h2 id="definitions">Definitions</h2>
+<h3 id="useful-rts-terms">Useful RTS terms</h3>
 <dl>
 <dt><code>Capability</code></dt>
-<dd><p>Corresponds to a CPU. The number of capabilities should match the number of CPUs. See <a href="http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Scheduler#Capabilities">cap</a>.</p>
+<dd><p>Corresponds to a CPU. The number of capabilities should match the number of CPUs. See <a href="http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Scheduler#Capabilities" title="Capabilities">Capabilities</a>.</p>
 </dd>
-<dt><code>TSO</code></dt>
-<dd><p>Thread State Object. The state of a Haskell thread. See <a href="http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/HeapObjects#ThreadStateObjects">tso</a>.</p>
+<dt>TSO</dt>
+<dd><p>Thread State Object. The state of a Haskell thread. See <a href="http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/HeapObjects#ThreadStateObjects" title="Thread State Objects">Thread State Objects</a>.</p>
 </dd>
 <dt>Heap object</dt>
-<dd><p>Objects on the heap all take the form of an <code>StgClosure</code> structure with a header pointing and a payload of data. The header points to code and an info table. See <a href="http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/HeapObjects">heap</a>.</p>
+<dd><p>Objects on the heap all take the form of an <code>StgClosure</code> structure with a header pointing and a payload of data. The header points to code and an info table. See <a href="http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/Storage/HeapObjects" title="Heap Objects">Heap Objects</a>.</p>
 </dd>
 </dl>
-<h1 id="overview">Overview</h1>
-<p>TODO: code examples in all of the subsections of the overview.</p>
-<p>At the high level, transactions are computations that read and write to <code>TVar</code>s with changes only being committed atomically and reads only seeing consistent state. Transactions can also be composed together, building new transactions out of existing transactions. In the RTS each transaction keeps a record of its interaction with the <code>TVar</code>s it touches in a <code>TRec</code>. A pointer to this record is stored in the TSO that is running the transaction.</p>
-<h2 id="nesting">Nesting</h2>
-<p>In addition, transactions can be &quot;retried&quot; with explicit <code>retry</code> that aborts the transaction and allows an alternative transaction to run on the current thread with the <code>orElse</code> combinator or the same transaction can be run again when changes happen on another thread.</p>
-<h2 id="validation">Validation</h2>
-<p>Before a transaction can publish its effects it must check that it has seen a consistent view of memory while it was executing.</p>
-<h2 id="committing">Committing</h2>
-<p>When we try to commit we check that invariants continue to hold, that we have seen a consistent view of memory (validation), and that version numbers have stayed consistent. If all this holds we will have acquired the locks for the affected <code>TVar</code>s and can atomically make visible changes to memory (with respect to other transactions).</p>
-<p>TODO: talk about the mechanism, locking, and have worked examples.</p>
-<h2 id="aborting">Aborting</h2>
+<h3 id="transactional-memory-terms">Transactional Memory terms</h3>
+<dl>
+<dt>Read set</dt>
+<dd><p>The set of <code>TVar</code>s that are read, but not written to durring a transaction.</p>
+</dd>
+<dt>Write set</dt>
+<dd><p>The set of <code>TVar</code>s that are written to durring a transaction. In the code each written <code>TVar</code> is called an &quot;update entry&quot; in the transactional record.</p>
+</dd>
+<dt>Access set</dt>
+<dd><p>All <code>TVar</code>s accessed durring the transaction.</p>
+</dd>
+</dl>
+<p>While GHC's STM does not have a separate read set and write set these terms are useful for discussion.</p>
+<dl>
+<dt>Retry</dt>
+<dd><p>Here we will use the term retry exclusively for the blocking primitive in GHC's STM. This should not be confused with the steps taken when a transaction detects that it has seen an inconsistent view of memory and must start again from the beginning.</p>
+</dd>
+<dt>Failure</dt>
+<dd><p>A failed transaction is one that has seen inconsistent state. This should not be confused with a successful transaction that executes the <code>retry</code> primitive.</p>
+</dd>
+</dl>
+<h1 id="overview-of-features">Overview of Features</h1>
+<p>At the high level, transactions are computations that read and write to <code>TVar</code>s with changes only being committed atomically after seeing a consistent view of memory. Transactions can also be composed together, building new transactions out of existing transactions. In the RTS each transaction keeps a record of its interaction with the <code>TVar</code>s it touches in a <code>TRec</code>. A pointer to this record is stored in the TSO that is running the transaction.</p>
+<h2 id="reading-and-writing">Reading and Writing</h2>
+<p>The semantics of a transaction require that when a <code>TVar</code> is read in a transaction, ts value will stay the same for the duration of execution. Similarly a write to a <code>TVar</code> will keep the same value for the duration of the transaction. The transaction itself, however, from the perspective of other threads can apply all of its effects in one moment. That is, other threads cannot see intermediate states of the transaction, so it is as if all the effects happen in a single moment.</p>
+<p>As a simple example we can consider a transaction that transfers value between two accounts:</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">transfer ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">TVar</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">TVar</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">STM</span> ()
+transfer v a b <span class="fu">=</span> <span class="kw">do</span>
+    x <span class="ot">&lt;-</span> readTVar a
+    y <span class="ot">&lt;-</span> readTVar b
+    writeTVar a (x <span class="fu">-</span> v)
+    writeTVar b (y <span class="fu">+</span> v)</code></pre>
+<p>No other thread can observe the value <code>x - v</code> in <code>a</code> without also observing <code>y + v</code> in <code>b</code>.</p>
+<h2 id="blocking">Blocking</h2>
+<p>Transactions can choose to block until changes are made to <code>TVar</code>s that allow it to try again. This is enabled with an explicit <code>retry</code>. Note that when changes are made the transaction is restarted from the beginning.</p>
+<p>Continuing the example, we can choose to block when there are insufficient funds:</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">transferBlocking ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">TVar</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">TVar</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">STM</span> ()
+transferBlocking v a b <span class="fu">=</span> <span class="kw">do</span>
+    x <span class="ot">&lt;-</span> readTVar a
+    y <span class="ot">&lt;-</span> readTVar b
+    <span class="kw">if</span> x <span class="fu">&lt;</span> v
+      <span class="kw">then</span> retry
+      <span class="kw">else</span> <span class="kw">do</span>
+              writeTVar a (x <span class="fu">-</span> v)
+              writeTVar b (y <span class="fu">+</span> v)</code></pre>
+<h2 id="choice">Choice</h2>
+<p>Any blocking transaction can be composed with <code>orElse</code> to choose an alternative transaction to run instead of blocking. The <code>orElse</code> primitive operation creates a nested transaction and if this first transaction executes <code>retry</code>, the effects of the nested transaction are rolled back and the alternative transaction is executed. This choice is biased towards the first parameter. A validation failure in the first branch aborts the entire transaction, not just the nested part. An explicit <code>retry</code> is the only mechanism that gives partial rollback.</p>
+<p>We now can choose the account that has enough funds for the transfer:</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">transferChoice ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">TVar</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">TVar</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">TVar</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">STM</span> ()
+transferChoice v a a&#39; b <span class="fu">=</span> <span class="kw">do</span>
+    transferBlocking v a b <span class="ot">`orElse`</span> transferBlocking v a&#39; b</code></pre>
+<h2 id="data-invariants">Data Invariants</h2>
+<p>Invariants support checking global data invariants beyond the atomicity transactions demand. For instance, a transactional linked list (written correctly) will never have an inconsistent structure due to the atomicity of updates. It is no harder to maintain this property in a concurrent setting then in a sequential one with STM. It may be desired, however, to make statements about the consistency of the <em>data</em> in a particular a sorted linked list is sorted, not because of the structure (where the <code>TVar</code>s point to) but instead because of the data in the structure (the relation between the data in adjacent nodes). Global data invariant checks can be introduced with the <code>always</code> operation which demands that the transaction it is given results in <code>True</code> very every transaction that is committed globally.</p>
+<p>We can use data invariants to guard against negative balances:</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">newNonNegativeAccount ::</span> <span class="dt">STM</span> (<span class="dt">TVar</span> <span class="dt">Int</span>)
+newNonNegativeAccount <span class="fu">=</span> <span class="kw">do</span>
+    t <span class="ot">&lt;-</span> newTVar <span class="dv">0</span>
+    always <span class="fu">$</span> <span class="kw">do</span>
+        x <span class="ot">&lt;-</span> readTVar t
+        <span class="fu">return</span> (x <span class="fu">&gt;</span> <span class="dv">0</span>)
+    <span class="fu">return</span> t</code></pre>
+<h2 id="exceptions">Exceptions</h2>
+<p>Exceptions inside transactions should only propagate outside if the transaction has seen a consistent view of memory. Note that the semantics of exceptions allow the exception itself to capture the view of memory from inside the transaction, but this transaction is not committed.</p>
+<h1 id="overview-of-the-implementation">Overview of the Implementation</h1>
+<p>We will start this section by considering building GHC's STM with only the features of reading and writing. Then we will add <code>retry</code> then <code>orElse</code> and finally data invariants. Each of the subsequent features adds more complexity to the implementation. Taken all at once it can be difficult to understand the subtlety of some of the design choices.</p>
+<h2 id="transactions-that-read-and-write.">Transactions that Read and Write.</h2>
+<p>With this simplified view we only support <code>newTVar</code>, <code>readTVar</code>, and <code>writeTVar</code> as well as all the STM type class instances except <code>Alternative</code>.</p>
+<h3 id="transactional-record">Transactional Record</h3>
+<p>The overall scheme of GHC's STM is to perform all the effects of a transaction locally in the transactional record or <code>TRec</code>. Once the transaction has finished its work locally, a value based consistency check determines if the values read for the entire access set are consistent. This only needs to consider the <code>TRec</code> and the main memory view of the access set as it is assumed that main memory is always consistent. This check also obtains locks for the write set and with those locks we can update main memory and unlock. Rolling back the effects of a transaction is just forgetting the current <code>TRec</code> and starting again.</p>
+<p>The transactional record itself will have an entry for each transactional variable that is accessed. Each entry has a pointer to the <code>TVar</code> heap object and a record of the value that the <code>TVar</code> held when it was first accessed.</p>
+<h3 id="starting">Starting</h3>
+<p>A transaction starts by initializing a new <code>TRec</code> (<code>stmStartTransaction</code>) assigning the TSO's <code>trec</code> pointer to the new <code>TRec</code> then executing the transaction's code.</p>
+<p>(See [source:rts/PrimOps.cmm] <code>stg_atomicallyzh</code> and [source:rts/STM.c] <code>stmStartTransaction</code>).</p>
+<h3 id="reading">Reading</h3>
+<p>When a read is attempted we first search the <code>TRec</code> for an existing entry. If it is found, we use that local view of the variable. On the first read of the variable, a new entry is allocated and the value of the variable is read and stored locally. The original <code>TVar</code> does not need to be accessed again for its value until a validation check is needed.</p>
+<p>In the coarse grain version, the read is done without synchronization. With the fine grain lock, the lock variable is the <code>current_value</code> of the <code>TVar</code> structure. While reading an inconsistent value is an issue that can be resolved later, reading a value that indicates a lock and handing that value to code that expects a different type of heap object will almost certainly lead to a runtime failure. To avoid this the fine grain lock version of the code will spin if the value read is a lock, waiting to observe the lock released with an appropriate pointer to a heap object.</p>
+<p>(See [source:rts/STM.c] <code>stmReadTVar</code>)</p>
+<h3 id="writing">Writing</h3>
+<p>Writing to a <code>TVar</code> requires that the variable first be in the <code>TRec</code>. If it is not currently in the <code>TRec</code>, a read of the <code>TVar</code>'s value is stored in a new entry (this value will be used to validate and ensure that no updates were made concurrently to this variable).</p>
+<p>In both the fine grain and coarse grain lock versions of the code no synchronization is needed to perform the write as the value is stored locally in the <code>TRec</code> until commit time.</p>
+<p>(See [source:rts/STM.c] <code>stmWriteTVar</code>)</p>
+<h3 id="validation">Validation</h3>
+<p>Before a transaction can make its effects visible to other threads it must check that it has seen a consistent view of memory while it was executing. Most of the work is done in <code>validate_and_acquire_ownership</code> by checking that <code>TVar</code>s hold their expected values.</p>
+<p>For the coarse grain lock version the lock is held before entering <code>validate_and_acquire_ownership</code> through the writing of values to <code>TVar</code>s. With the fine grain lock, validation acquires locks for the write set and reads a version number consistent with the expected value for each <code>TVar</code> in the read set. After all the locks for writes have been acquired, The read set is checked again to see if each value is still the expected value and the version number still matches (<code>check_read_only</code>).</p>
+<p>(See [source:rts/STM.c] <code>validate_and_acquire_ownership</code> and <code>check_read_only</code>)</p>
+<h3 id="committing">Committing</h3>
+<p>Before committing, each invariant associated with each accessed <code>TVar</code> needs to be checked by running the invariant transaction with its own <code>TRec</code>. The read set for each invariant is merged into the transaction as those reads must be included in the consistency check. The <code>TRec</code> is then validated. If validation fails, the transaction must start over from the beginning after releasing all locks. In the case of the coarse grain lock validation and commit are in a critical section protected by the global STM lock. Updates to <code>TVar</code>s proceeds while holding the global lock.</p>
+<p>With the fine grain lock version when validation, including any read-only phase, succeeds, two properties will hold simultaneously that give the desired atomicity:</p>
+<ul>
+<li>Validation has witnessed all <code>TVar</code>s with their expected value.</li>
+<li>Locks are held for all of the <code>TVar</code>s in the write set.</li>
+</ul>
+<p>Commit can proceed to increment each locked <code>TVar</code>'s <code>num_updates</code> field and unlock by writing the new value to the <code>current_value</code> field. While these updates happen one-by-one, any attempt to read from this set will spin while the lock is held. Any reads made before the lock was acquired will fail to validate as the number of updates will change.</p>
+<p>(See [source:rts/PrimOps.cmm] <code>stg_atomically_frame</code> and [source:rts/STM.c] <code>stmCommitTransaction</code>)</p>
+<h3 id="aborting">Aborting</h3>
 <p>Aborting is simply throwing away changes that are stored in the <code>TRec</code>.</p>
+<p>(See [source:rts/STM.c] <code>stmAbortTransaction</code>)</p>
+<h3 id="exceptions-1">Exceptions</h3>
+<p>An exception in a transaction will only propagate outside of the transaction if the transaction can be validated. If validation fails, the whole transaction will abort and start again from the beginning. Nothing special needs to be done to support the semantics allowing the view <em>inside</em> the aborted transaction.</p>
+<p>(See [source:rts/Exception.cmm] which calls <code>stmValidateNestOfTransactions</code> from [source:rts/STM.c]).</p>
+<h2 id="blocking-with-retry">Blocking with <code>retry</code></h2>
+<p>We will now introduce the blocking feature. To support this we will add a watch queue to each <code>TVar</code> where we can place a pointer to a blocked TSO. When a transaction commits we will now wake up the TSOs on watch queues for <code>TVar</code>s that are written.</p>
+<p>The mechanism for <code>retry</code> is similar to exception handling. In the simple case of only supporting blocking and not supporting choice, an encountered retry should validate, and if valid, add the TSO to the watch queue of every accessed <code>TVar</code> (see [source:rts/STM.c] <code>stmWait</code> and <code>build_watch_queue_entries_for_trec</code>). Locks are acquired for all <code>TVar</code>s when validating to control access to the watch queues and prevent missing an update to a <code>TVar</code> before the thread is sleeping. In particular if validation is successful the locks are held after the return of <code>stmWait</code>, through the return to the scheduler, after the thread is safely paused (see [source:rts/HeapStackCheck.cmm] <code>stg_block_stmwait</code>), and until <code>stmWaitUnlock</code> is called. This ensures that no updates to the <code>TVar</code>s are made until the TSO is ready to be woken. If validation fails, the <code>TRec</code> is discarded and the transaction is started from the beginning. (See [source:rts/PrimOps.cmm] <code>stg_retryzh</code>)</p>
+<p>When a transaction is committed, each write that it makes to a <code>TVar</code> is preceded by waking up each TSO in the watch queue. Eventually these TSOs will be run, but before restarting the transaction its <code>TRec</code> is validated again if valid then nothing has changed that will allow the transaction to proceed with a different result. If invalid, some other transaction has committed and progress may be possible (note there is the additional case that some other transaction is merely holding a lock temporarily, causing validation to fail). The TSO is not removed from the watch queues it is on until the transaction is aborted (at this point we no longer need the <code>TRec</code>) and the abort happens after the failure to validate on wakeup. (See [source:rts/STM.c] <code>stmReWait</code> and <code>stmAbortTransaction</code>)</p>
+<h2 id="choice-with-orelse">Choice with <code>orElse</code></h2>
+<p>When <code>retry#</code> executes it searches the stack for either a <code>CATCH_RETRY_FRAME</code> or the outer <code>ATOMICALLY_FRAME</code> (the boundary between normal execution and the transaction). The former is placed on the stack by an <code>orElse</code> (see [source:rts/PrimOps.cmm] <code>stg_catchRetryzh</code>) and if executing the first branch we can partially abort and switch to the second branch, otherwise we propagate the <code>retry</code> further. In the latter case this <code>retry</code> represents a transaction that should block and the behavior is as above with only <code>retry</code>.</p>
+<p>How do we support a &quot;partial abort&quot;? This introduces the need for a nested transaction. Our <code>TRec</code> will now have a pointer to an outer <code>TRec</code> (the <code>enclosing_trec</code> field). This allows us to isolate effects from the branch of the <code>orElse</code> that we might need to abort. Let's revisit the features that need to take this into account.</p>
+<ul>
+<li><p><strong>Reading</strong> -- Reads now search the chain of nested transactions in addition to the local <code>TRec</code>. When an entry is found in a parent it is copied into the local <code>TRec</code>. Note that there is still only a single access to the actual <code>TVar</code> through the life of the transaction (until validation).</p></li>
+<li><p><strong>Writing</strong> -- Writes, like reads, now search the parent <code>TRec</code>s and the write is stored in the local copy.</p></li>
+<li><p><strong>Retry</strong> -- As described above, we now need to search the stack for a <code>CATCH_RETRY_FRAME</code> and if found, aborting the nested transaction and attempting the alternative or propagating the retry instead of immediately working on blocking.</p></li>
+<li><p><strong>Validation</strong> -- If we are validating in the middle of a running transaction we will need to validate the whole nest of transactions.</p>
+<p>(See [source:rts/STM.c] <code>stmValidateNestOfTransactions</code> and its uses in [source:rts/Exception.cmm] and [source:rts/Schedule.c])</p></li>
+<li><p><strong>Committing</strong> -- Just as we now have a partial abort, we need a partial commit when we finish a branch of an <code>orElse</code>. This commit is done with <code>stmCommitNestedTransaction</code> which validates just the inner <code>TRec</code> and merges updates back into its parent. Note that an update is distinguished from a read only entry by value. This means that if a nested transaction performs a write that reverts a value this is a change and must still propagate to the parent (see [trac:#7493]).</p></li>
+<li><p><strong>Aborting</strong> -- There is another subtle issue with how choice and blocking interact. When we block we need to wake up if there is a change to <em>any</em> accessed <code>TVar</code>. Consider a transaction <code>t = t1 \</code>orElse` t2<code>where both</code>t1<code>and</code>t2<code>execute</code>retry<code>.  Even though the effects of</code>t1<code>are thrown     away, it could be that a change to a</code>TVar<code>that is only in the access set     of</code>t1` will allow the whole transaction to succeed when it is woken.</p>
+<p>To solve this problem, when a branch on a nested transaction is aborted the access set of the nested transaction is merged as a read set into the parent <code>TRec</code>. Specifically if the <code>TVar</code> is in <em>any</em> <code>TRec</code> up the chain of nested transactions it must be ignored, otherwise it is entered as a new entry (retaining just the read) in the parent <code>TRec</code>.</p>
+<p>(See again [trac:#7493] and [source:rts/STM.c] <code>merge_read_into</code>)</p></li>
+<li><p><strong>Exceptions</strong> -- The only change needed here each <code>CATCH_RETRY_FRAME</code> on the stack represents a nested transaction. As the stack is searched for a handler, at each encountered <code>CATCH_RETRY_FRAME</code> the nested transaction is aborted. When the <code>ATOMICALLY_FRAME</code> is encountered we then know that there is no nested transaction.</p>
+<p>(See [source:rts/Exception.cmm] <code>stg_raisezh</code>)</p></li>
+</ul>
+<p>(See [source:rts/PrimOps.cmm] <code>stg_retryzh</code> and <code>stg_catch_retry_frame</code>)</p>
 <h2 id="invariants">Invariants</h2>
-<p>As a transaction is executing it can collect a queue of dynamically checked invariants. These invariants are transactions that are never committed, but if they raise an exception when executed successfully that exception will propagate out of the atomic frame.</p>
+<p>We will start this section with an overview of some of the details then review with notes on the changes from the choice case.</p>
+<h3 id="details">Details</h3>
+<p>As a transaction is executing it can collect dynamically checked data invariants. These invariants are transactions that are never committed, but if they raise an exception when executed successfully that exception will propagate out of the atomic frame.</p>
 <dl>
 <dt><code>check#</code></dt>
 <dd><p>Primitive operation that adds an invariant (transaction to run) to the queue of the current <code>TRec</code> by calling <code>stmAddInvariantToCheck</code>.</p>
@@ -48,25 +185,46 @@
 <dd><p>A wrapper for <code>check#</code> (to give it the <code>STM</code> type).</p>
 </dd>
 <dt><code>alwaysSucceeds :: STM a -&gt; STM ()</code></dt>
-<dd><p>This is the <code>check</code> from the &quot;Transactional memory with data invariants&quot; paper.<br />The action immediately runs, wrapped in a nested transaction so that it will never commit but will have an opportunity to raise an exception. If successful, the originally passed action is added to the invariant queue.</p>
+<dd><p>This is the <code>check</code> from the &quot;Transactional memory with data invariants&quot; paper. The action immediately runs, wrapped in a nested transaction so that it will never commit but will have an opportunity to raise an exception. If successful, the originally passed action is added to the invariant queue.</p>
 </dd>
 <dt><code>always :: STM Bool -&gt; STM ()</code></dt>
 <dd><p>Takes an <code>STM</code> action that results in a <code>Bool</code> and adds an invariant that throws an exception when the result of the transaction is <code>False</code>.</p>
 </dd>
 </dl>
-<p>The bookkeeping for invariants is in each <code>TRec</code>s <code>invariants_to_check</code> queue and the <code>StgAtomicallyFrame</code>s <code>next_invariant_to_check</code> field. Each invariant is in a <code>StgAtomicInvariant</code> structure that includes the <code>STM</code> action, the <code>TRec</code> where it was last executed, and a lock (TODO: why a lock?). This is added to the current <code>TRec</code>s queue when <code>check#</code> is executed.</p>
-<p>When a transaction completes, execution will reach the <code>stg_atomically_frame</code> and the <code>TRec</code>s <code>enclosing_trec</code> will be <code>NO_TREC</code> (a nested transaction would have a <code>stg_catch_retry_frame</code> before the <code>stg_atomically_frame</code> to handle cases of non-empty <code>enclosing_trec</code>). The frame will then check the invariants by collecting the invariants it needs to check with <code>stmGetInvariantsToCheck</code>, dequeuing each, executing, and when (or if) we get back to the frame aborting the invariant action (if it failed, we would not get here due to an exception, if it succeeds we do not want its effects). Once all the invariants have been checked, the frame will be attempt to commit.</p>
+<p>The bookkeeping for invariants is in each <code>TRec</code>s <code>invariants_to_check</code> queue and the <code>StgAtomicallyFrame</code>s <code>next_invariant_to_check</code> field. Each invariant is in a <code>StgAtomicInvariant</code> structure that includes the <code>STM</code> action, the <code>TRec</code> where it was last executed, and a lock. This is added to the current <code>TRec</code>s queue when <code>check#</code> is executed.</p>
+<p>When a transaction completes, execution will reach the <code>stg_atomically_frame</code> and the <code>TRec</code>s <code>enclosing_trec</code> will be <code>NO_TREC</code> (a nested transaction would have a <code>stg_catch_retry_frame</code> before the <code>stg_atomically_frame</code> to handle cases of non-empty <code>enclosing_trec</code>). The frame will then check the invariants by collecting the invariants it needs to check with <code>stmGetInvariantsToCheck</code>, dequeuing each, executing, and when (or if) we get back to the frame, aborting the invariant action. If the invariant failed to hold, we would not get here due to an exception and if it succeeds we do not want its effects. Once all the invariants have been checked, the frame will to commit.</p>
 <p>TODO: Explain how <code>stmGetInvariantsToCheck</code> works.</p>
 <p>For each update entry (a write to a <code>TVar</code>) in the <code>TRec</code></p>
-<p>Note that there is a <code>check</code> in the <code>stm</code> package in <code>Control.Monad.STM</code> which matches the <code>check</code> from the &quot;Beautiful concurrency&quot; chapter of &quot;Beautiful code&quot; <a href="http://research.microsoft.com/pubs/74063/beautiful.pdf">beauty</a>:</p>
+<p>Note that there is a <code>check</code> in the <code>stm</code> package in <code>Control.Monad.STM</code> which matches the <code>check</code> from the <a href="http://research.microsoft.com/pubs/74063/beautiful.pdf" title="Beautiful Concurrency">beauty</a> chapter of &quot;Beautiful code&quot;:</p>
 <pre><code>check :: Bool -&gt; STM ()
-check b = if b then return () else retry
-</code></pre>
+check b = if b then return () else retry</code></pre>
 <p>It requires no additional runtime support. If it is a transaction that produces the <code>Bool</code> argument it will be committed (when <code>True</code>) and it is only a one time check, not an invariant that will be checked at commits.</p>
-<h2 id="watch-queues">Watch Queues</h2>
-<p>With <code>retry</code>, <code>orElse</code>, and invariants we have conditions beyond a consistent view of memory that need to hold for the transaction to commit. To efficiently resolve failing conditions, transactions are not immediately restarted but wait for something to change that might make it possible to succeed on a subsequent attempt. This is done using the watch queue associated with each <code>TVar</code>. The watch queue contains invariants (when ???) and TSOs. When a transaction executes <code>retry</code> and there is no <code>CATCH_RETRY_FRAME</code> (from an <code>orElse</code>) above it (it has exhausted all the alternatives) the transaction will wait by calling <code>stmWait</code>. This verifies that the transaction is valid (acquiring locks for all <code>TVar</code>s in the <code>TRec</code>) and if valid adds the transaction's TSO to each <code>TVar</code>s watch queue. When another thread commits a transaction that writes to a <code>TVar</code>, each TSO on the watch queue is woken (scheduled for running on the current capability).</p>
-<p>TODO: add details about watch queues.</p>
-<h2 id="fine-grain-locking">Fine Grain Locking</h2>
+<h3 id="changes-from-choice">Changes from Choice</h3>
+<p>With the addition of data invariants we have the following changes to the implementation:</p>
+<ul>
+<li><p><strong>Retrying</strong> -- A retry in an invariant indicates that the invariant could not proceed and the whole transaction should block. This special case is detected when an <code>ATOMICALLY_FRAME</code> is encountered with a nest of transactions (i.e. when the <code>enclosing_trec</code> field is not <code>NO_TREC</code>). The invariant is simply aborted and execution proceeds to <code>stmWait</code> (see [source:rts/PrimOps.cmm] <code>stg_retryzh</code>).</p></li>
+<li><p><strong>Commiting</strong> -- Commit now needs a phase where it runs invariants after the code of the transaction has completed but before commit. The implementation recycles the structure already in place for this phase so special cases are needed in the <code>ATOMICALLY_FRAME</code> that collects invariants and works through them one at a time then moves on to committing (see [source:rts/PrimOps.cmm] <code>stg_atomically_frame</code>).</p>
+<p>To efficiently handle invariants they need to only be checked when a relevant data dependency changes. This means we can associate them with the <code>TRec</code> of the last commit that needed to check the invariant at the cost of serializing invariant handling commits. This is enforced by the lock on each invariant. If it cannot be acquired the whole transaction must start over.</p>
+<p>At commit time, each invariant is locked and the read set for the last commited transaction of each invariant is merged into the <code>TRec</code>.<br />Validation acuqires lock for all entries in the <code>TRec</code> (not just the writes). After validation, each invariant is removed from the watch queue of each <code>TVar</code> it previously depended on, then the <code>TRec</code> that was used when executing the invariant code is updated to reflect the values from the final execution of the main transaction and each <code>TVar</code>, being a data depenency of the invariant, has the invariant added to its watch queue.</p>
+<p>(See [source:rts/STM.c] <code>stmCommitTransaction</code>, <code>disconnect_invariant</code> and <code>connect_invariant_to_trec</code>)</p></li>
+<li><p><strong>Exceptions</strong> -- When an exception propagates to the <code>ATOMICALLY_FRAME</code> there are now two states that it could encounter. If there is no enclosing <code>TRec</code> we are not dealing with an exception from an invariant and it proceeds as above. Seeing a nest of transactions indicates that the transaction was checking an invariant when it encountered the exception. The effect of a failed invariant <em>is</em> this exception so nothing special needs to be done except to validate and abort both the outer transaction and the nested transaction (see [source:rts/Exception.cmm] <code>stg_raisezh</code>).</p></li>
+</ul>
+<h2 id="other-details">Other Details</h2>
+<p>TODO: GC and ABA.</p>
+<p>TODO: Detecting long running transactions.</p>
+<p>TODO: Asynchronous exceptions?</p>
+<p>TODO: Tokens and version numbers.</p>
+<p>TODO: Transaction status.</p>
+<p>TODO: Management of <code>TRec</code>s, chunks, recycling.</p>
+<h3 id="implementation-invariants">Implementation Invariants</h3>
+<p>Some of the invariants of the implementation:</p>
+<ul>
+<li><p>Locks are only acquired in [source:rts/STM.c] and are always released before the end of a function call (with the exception of <code>stmWait</code> which must release locks after the thread is safe).</p></li>
+<li><p>When running a transaction each <code>TVar</code> is read exactly once and if it is a write, is updated exactly once.</p></li>
+<li><p>Main memory (<code>TVar</code>s) always holds consistent values or locks of a partially updated commit. That is a set of reads at any moment from <code>TVar</code>s will result in consistent data if none of the values are locks.</p></li>
+<li><p>A nest of <code>TRec</code>s has a matching nest of <code>CATCH_RETRY_FRAME</code>s ending with an <code>ATOMICALLY_FRAME</code> on the stack. One exception to this is when checking data invariants the invariant's <code>TRec</code> is nested under the top level <code>TRec</code> without a <code>CATCH_RETRY_FRAME</code>.</p></li>
+</ul>
+<h3 id="fine-grain-locking">Fine Grain Locking</h3>
 <p>The locks in fine grain locking (<code>STM_FG_LOCKS</code>) are at the <code>TVar</code> level and are implemented by placing the locking thread's <code>TRec</code> in the <code>TVar</code>s current value using a compare and swap (<code>lock_tvar</code>). The value observed when locking is returned by <code>lock_tvar</code>. To test if a <code>TVar</code> is locked the value is inspected to see if it is a <code>TRec</code> (checking that the closure's info table pointer is to <code>stg_TREC_HEADER_info</code>). If a <code>TRec</code> is found <code>lock_tvar</code> will spin reading the <code>TVar</code>s current value until it is not a <code>TRec</code> and then attempt again to obtain the lock. Unlocking is simply a write of the current value of the <code>TVar</code>. There is also a conditional lock <code>cond_lock_tvar</code> which will obtain the lock if the <code>TVar</code>s current value is the given expected value. If the <code>TVar</code> is already locked this will not be the case (the value would be a <code>TRec</code>) and if the <code>TVar</code> has been updated to a new (different) value then locking will fail because the value does not match the expected value. A compare and swap is used for <code>cond_lock_tvar</code>.</p>
 <h1 id="code-reference">Code Reference</h1>
 <p>TODO: flesh out these notes.</p>
@@ -143,5 +301,11 @@ check b = if b then return () else retry
 <p>TODO: schedule, GC, and exception details.</p>
 <p><code>rts/Schedule.c</code></p>
 <p><code>rts/RaiseAsync.c</code></p>
+<h2 id="bibliography">Bibliography</h2>
+<p>Harris, Tim, James Larus, and Ravi Rajwar. &quot;Transactional memory.&quot; <em>Synthesis Lectures on Computer Architecture</em> 5.1 (2010): 1-263.</p>
+<p>Jones, Simon Peyton. &quot;Beautiful concurrency.&quot; <em>Beautiful Code: Leading Programmers Explain How They Think</em> (2007): 385-406.</p>
+<p>Harris, Tim, et al. &quot;Composable memory transactions.&quot; <em>Proceedings of the tenth ACM SIGPLAN symposium on Principles and practice of parallel programming.</em> ACM, 2005.</p>
+<p>Perfumo, Cristian, et al. &quot;The limits of software transactional memory (STM): dissecting Haskell STM applications on a many-core environment.&quot; <em>Proceedings of the 5th conference on Computing frontiers.</em> ACM, 2008.</p>
+<p>Harris, Tim, and Simon Peyton Jones. &quot;Transactional memory with data invariants.&quot; <em>First ACM SIGPLAN Workshop on Languages, Compilers, and Hardware Support for Transactional Computing (TRANSACT'06), Ottowa.</em> 2006.</p>
 </body>
 </html>
