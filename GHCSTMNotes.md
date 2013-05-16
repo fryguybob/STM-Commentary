@@ -385,10 +385,14 @@ to take this into account.
 
 -   **Aborting** -- There is another subtle issue with how choice and blocking
     interact.  When we block we need to wake up if there is a change to *any*
-    accessed `TVar`.  Consider a transaction `t = t1 \`orElse\` t2` where both
-    `t1` and `t2` execute `retry`.  Even though the effects of `t1` are thrown
-    away, it could be that a change to a `TVar` that is only in the access set
-    of `t1` will allow the whole transaction to succeed when it is woken.
+    accessed `TVar`.  Consider a transaction:
+
+        t = t1 `orElse` t2
+    
+    If both `t1` and `t2` execute `retry` then even though the effects of `t1`
+    are thrown away, it could be that a change to a `TVar` that is only in the
+    access set of `t1` will allow the whole transaction to succeed when it is
+    woken.
 
     To solve this problem, when a branch on a nested transaction is aborted the
     access set of the nested transaction is merged as a read set into the
