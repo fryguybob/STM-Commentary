@@ -1,6 +1,6 @@
 % GHC STM Notes
 % Ryan Yates
-% 1-2-2013
+% 5-17-2013
 
 # Introduction
 
