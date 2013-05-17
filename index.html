@@ -239,26 +239,26 @@ check b = if b then return () else retry</code></pre>
 <thead>
 <tr class="header">
 <th align="left"><code>T1</code></th>
-<th align="left"><code>TVar</code>s</th>
+<th align="left"><code>TVar</code></th>
 <th align="left"><code>T2</code></th>
 <th align="left">Action</th>
 </tr>
 </thead>
 <tbody>
 <tr class="odd">
-<td align="left">A 0 0</td>
-<td align="left">A 0</td>
+<td align="left"><code>A 0 0</code></td>
+<td align="left"><code>A 0</code></td>
 <td align="left"></td>
 <td align="left"><code>T1</code> read A</td>
 </tr>
 <tr class="even">
 <td align="left"></td>
-<td align="left">B 0</td>
-<td align="left">B 0 0</td>
+<td align="left"><code>B 0</code></td>
+<td align="left"><code>B 0 0</code></td>
 <td align="left"><code>T2</code> read B</td>
 </tr>
 <tr class="odd">
-<td align="left">B 0 1</td>
+<td align="left"><code>B 0 1</code></td>
 <td align="left"></td>
 <td align="left"></td>
 <td align="left"><code>T1</code> write B 1</td>
@@ -266,30 +266,30 @@ check b = if b then return () else retry</code></pre>
 <tr class="even">
 <td align="left"></td>
 <td align="left"></td>
-<td align="left">A 0 1</td>
+<td align="left"><code>A 0 1</code></td>
 <td align="left"><code>T2</code> write A 1</td>
 </tr>
 <tr class="odd">
-<td align="left">A 0 0 0</td>
-<td align="left">A 0</td>
+<td align="left"><code>A 0 0 0</code></td>
+<td align="left"><code>A 0</code></td>
 <td align="left"></td>
 <td align="left"><code>T1</code> Validation Part 1 (read A)</td>
 </tr>
 <tr class="even">
 <td align="left"></td>
-<td align="left">A T2</td>
+<td align="left"><code>A T2</code></td>
 <td align="left"></td>
 <td align="left"><code>T2</code> Validation (Lock A)</td>
 </tr>
 <tr class="odd">
 <td align="left"></td>
-<td align="left">B 0</td>
-<td align="left">B 0 0 0</td>
+<td align="left"><code>B 0</code></td>
+<td align="left"><code>B 0 0 0</code></td>
 <td align="left"><code>T2</code> Validation (Read B)</td>
 </tr>
 <tr class="even">
 <td align="left"></td>
-<td align="left">B T1</td>
+<td align="left"><code>B T1</code></td>
 <td align="left"></td>
 <td align="left"><code>T1</code> Validation Part 2 (Lock B)</td>
 </tr>
