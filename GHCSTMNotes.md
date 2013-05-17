@@ -584,16 +584,16 @@ For instance, if two transactions `T1` and `T2` are committing at the same time
 and `T1` has read `A` and written `B` while `T2` has read `B` and written `A`,
 both the transactions can fail to commit.  For example, consider the interleaving:
 
-`T1`           `TVar`s             `T2`             Action
+`T1`           `TVar`              `T2`             Action
 -------------  ------------------  ---------------- -------------
-A 0 0          A 0                                  `T1` read A
-               B 0                 B 0 0            `T2` read B
-B 0 1                                               `T1` write B 1
-                                   A 0 1            `T2` write A 1
-A 0 0 0        A 0                                  `T1` Validation Part 1 (read A)
-               A T2                                 `T2` Validation (Lock A)
-               B 0                 B 0 0 0          `T2` Validation (Read B)
-               B T1                                 `T1` Validation Part 2 (Lock B)
+`A 0 0`        `A 0`                                `T1` read A
+               `B 0`               `B 0 0`          `T2` read B
+`B 0 1`                                             `T1` write B 1
+                                   `A 0 1`          `T2` write A 1
+`A 0 0 0`      `A 0`                                `T1` Validation Part 1 (read A)
+               `A T2`                               `T2` Validation (Lock A)
+               `B 0`               `B 0 0 0`        `T2` Validation (Read B)
+               `B T1`                               `T1` Validation Part 2 (Lock B)
 
 Note: the first and third columns are the local state of the `TRec`s and the
 second column is the values of the `TVar` structures.  Each `TRec` entry has the
