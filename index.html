@@ -34,6 +34,8 @@ code > span.er { color: #ff0000; font-weight: bold; }
 <h2 class="author">Ryan Yates</h2>
 <h3 class="date">5-17-2013</h3>
 </div>
+<p><em>Note: this document now lives <a href="http://hackage.haskell.org/trac/ghc/wiki/Commentary/Rts/STM">here</a>
+</em></p>
 <h1 id="introduction">Introduction</h1>
 <p>This document give an overview of the runtime system (RTS) support for GHC's STM implementation. We will focus on the case where fine grain locking is used (<code>STM_FG_LOCKS</code>).</p>
 <p>Some details about the implementation can be found in the papers <a href="http://research.microsoft.com/en-us/um/people/simonpj/papers/stm/stm.pdf" title="Composable Memory Transactions">&quot;Composable Memory Transactions&quot;</a> and <a href="http://research.microsoft.com/en-us/um/people/simonpj/papers/stm/stm-invariants.pdf" title="Transactional memory with data invariants">&quot;Transactional memory with data invariants&quot;</a>. Additional details can be found in the Harris et al book <a href="http://www.morganclaypool.com/doi/abs/10.2200/s00272ed1v01y201006cac011" title="Transactional Memory">&quot;Transactional memory&quot;</a>. Some analysis on performance can be found in the paper <a href="https://www.bscmsrc.eu/sites/default/files/cf-final.pdf" title="The Limits of Software Transactional Memory">&quot;The Limits of Software Transactional Memory&quot;</a> though this work only looks at the coarse grain lock version. Many of the other details here are gleaned from the comments in the source code.</p>
