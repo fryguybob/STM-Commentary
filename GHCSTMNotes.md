@@ -4,7 +4,7 @@
 
 # Introduction
 
-This document give an overview of the runtime system (RTS) support for
+This document gives an overview of the runtime system (RTS) support for
 GHC's STM implementation.  We will focus on the case where fine
 grain locking is used (`STM_FG_LOCKS`).
 
@@ -156,7 +156,8 @@ list is sorted, not because of the structure (where the `TVar`s point to) but
 instead because of the data in the structure (the relation between the data in
 adjacent nodes).  Global data invariant checks can be introduced with the
 `always` operation which demands that the transaction it is given results in
-`True` very every transaction that is committed globally.
+`True` and that it continues to hold for every transaction that is committed
+globally.
 
 We can use data invariants to guard against negative balances:
 
